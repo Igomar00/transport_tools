@@ -2326,7 +2326,13 @@ def assign_layer_from_distances(distances: np.ndarray, layer_thickness: float) -
 
 def get_layer_id_from_distance(distances: np.ndarray, layer_thickness: float) -> np.ndarray:
     """
-    Calculate layers for points based on their distances form starting point and the layer thickness
+    Calculate layers for points based on their distances form starting point and the layer thickness.
+
+    The layer N spans the distances from N * layer_thickness (exclusive) to (N + 1) * layer_thickness
+    (inclusive), hence every layer is exactly layer_thickness wide. The distances must not be quantized
+    to whole Angstroms before the division, which used to make the actual width of the layers oscillate
+    around the requested layer_thickness for all its non-integer values, e.g., alternating 1 A and 2 A
+    bands for the default thickness of 1.5 A.
     :param distances: distance of points from starting point
     :param layer_thickness: layer thickness
     :return: layerIDs
@@ -2335,7 +2341,7 @@ def get_layer_id_from_distance(distances: np.ndarray, layer_thickness: float) ->
     if layer_thickness <= 0:
         raise ValueError("Layer thickness has to be positive number")
 
-    return np.ceil(np.ceil(distances) / layer_thickness) - 1
+    return np.ceil(distances / layer_thickness) - 1
 
 
 def read_starting_points(tunnel_origin_file: str) -> np.ndarray:

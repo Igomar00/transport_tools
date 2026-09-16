@@ -774,6 +774,26 @@ class TestHelpers(unittest.TestCase):
         for thickness, out_val in zip(layer_thicknesses, test_helpers_layer_ids):
             self.assertTrue(np.allclose(get_layer_id_from_distance(distances, thickness), out_val, atol=1e-3))
 
+    def test_get_layer_id_from_distance_bands(self):
+        """
+        Every layer must span exactly layer_thickness, from N * layer_thickness (exclusive) to
+        (N + 1) * layer_thickness (inclusive). Quantizing the distances to whole Angstroms before the
+        division used to make the bands oscillate around the requested thickness, e.g., alternating
+        1 A and 2 A wide bands at the default thickness of 1.5 A.
+        """
+
+        from transport_tools.libs.geometry import get_layer_id_from_distance
+
+        eps = 1e-9
+        for thickness in [0.5, 1., 1.5, 2., 2.5, 4.75]:  # exactly representable, hence safe to probe at the bounds
+            for layer in range(10):
+                lower_bound = layer * thickness
+                upper_bound = (layer + 1) * thickness
+                probes = np.array([lower_bound + eps, (lower_bound + upper_bound) / 2, upper_bound])
+                self.assertListEqual([layer] * 3, get_layer_id_from_distance(probes, thickness).astype(int).tolist())
+                self.assertEqual(layer + 1, int(get_layer_id_from_distance(np.array([upper_bound + eps]),
+                                                                            thickness)[0]))
+
     def test_cart2spherical(self):
         from transport_tools.libs.geometry import cart2spherical
         from transport_tools.tests.units.data.data_geometry import test_helpers_rthetaphis, test_helpers_xyzs
