@@ -527,6 +527,32 @@ class TestLayeredRepresentation(unittest.TestCase):
         self.assertDictEqual(test_layered_repre_entity_points2clusters6,
                              self.merged_repre._assign_entity_points2clusters())
 
+    def test__merge_duplicate_clusters_leaves_no_duplicates(self):
+        """
+        Merging duplicated nodes of a layer must consume all the merged nodes. The node the merged one is
+        built from used to survive the merge, holding a second copy of the points that are already inside
+        the merged node, i.e., a node that _assign_entity_points2clusters() can never map any point to.
+        """
+
+        for repre in [self.repre1, self.repre2, self.repre3, self.repre4, self.repre5, self.merged_repre]:
+            for layer_id, layer in repre.layers.items():
+                points_of_nodes = dict()
+                for cls_id, cluster in layer.clusters.items():
+                    points_mat = cluster.matrix.get_whole_matrix()
+                    points_of_nodes[cls_id] = frozenset(zip(points_mat[:, 6].astype(int).tolist(),
+                                                            points_mat[:, 5].tolist()))
+
+                stored_points = sum(len(points) for points in points_of_nodes.values())
+                self.assertEqual(len(set().union(*points_of_nodes.values())), stored_points,
+                                 "layer {} of {} stores some points more than once".format(layer_id,
+                                                                                            repre.entity_label))
+                for cls_id, points in points_of_nodes.items():
+                    for other_id, other_points in points_of_nodes.items():
+                        if cls_id != other_id:
+                            self.assertFalse(points <= other_points,
+                                             "node {}_{} of {} is fully contained in the node {}_{}"
+                                             "".format(layer_id, cls_id, repre.entity_label, layer_id, other_id))
+
     def test_find_representative_paths(self):
         from transport_tools.tests.units.data.data_geometry import test_layered_repre_str1, test_layered_repre_str2, \
             test_layered_repre_str3, test_layered_repre_str4, test_layered_repre_str5, test_layered_repre_str6

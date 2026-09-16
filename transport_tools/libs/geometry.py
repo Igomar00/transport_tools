@@ -1733,6 +1733,9 @@ class LayeredRepresentation:
                         for merge_id in ids2merge[1:]:
                             tmp_cluster.merge_with_cluster(clusters[merge_id])
                             del self.layers[layer_id].clusters[merge_id]
+                        # the points of the first cluster are already inside tmp_cluster, keeping it here
+                        # would store them twice and leave a node that no point can ever be mapped to
+                        del self.layers[layer_id].clusters[ids2merge[0]]
                         tmp_cluster.compute_averages()
 
                         # new cluster is representative and is not substituted by > the number of merged duplicates
