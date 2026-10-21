@@ -121,6 +121,44 @@ def find_checkpoints(results_dir: str) -> Dict[int, str]:
     return checkpoints
 
 
+def supercluster_fingerprint(transport_processes) -> Dict[int, Dict[str, Tuple[int, ...]]]:
+    """
+    Tunnel clusters forming each supercluster. They are set at stage 5; later stages change only their validity flags.
+    A checkpoint of a later stage with a fingerprint other than that of the stage-5 checkpoint was therefore left by an
+    earlier run of stage 5 (TransportTools keeps checkpoints of later stages when restarted at stage 5)
+    :param transport_processes: TransportProcesses object from a checkpoint
+    :return: sc_id -> md_label -> sorted IDs of the tunnel clusters
+    """
+
+    return {int(sc_id): {md_label: tuple(sorted(int(cls_id) for cls_id in validity.keys()))
+                         for md_label, validity in super_cluster.tunnel_clusters_valid.items()}
+            for sc_id, super_cluster in transport_processes._super_clusters.items()}
+
+
+def _newest_current_checkpoint(checkpoints: Dict[int, str], finished_stages: List[int],
+                               load: Callable[[str], Any] = None) -> Tuple[int, Any, List[int]]:
+    """
+    Finds the newest checkpoint describing the current superclusters (fingerprint of the stage-5 checkpoint)
+    :param checkpoints: stage -> checkpoint file
+    :param finished_stages: sorted stages from 5 on to consider
+    :param load: function loading a checkpoint file (default: _load_checkpoint)
+    :return: its stage, the loaded TransportProcesses object, and the newer stages whose checkpoints are stale
+    """
+
+    load = load or _load_checkpoint
+    latest_stage = finished_stages[-1]
+    latest = load(checkpoints[latest_stage])
+    stale_stages = list()
+    if latest_stage > 5 and 5 in checkpoints:
+        stage5 = load(checkpoints[5])
+        reference = supercluster_fingerprint(stage5)
+        while latest_stage > 5 and supercluster_fingerprint(latest) != reference:
+            stale_stages.insert(0, latest_stage)
+            latest_stage = finished_stages[finished_stages.index(latest_stage) - 1]
+            latest = stage5 if latest_stage == 5 else load(checkpoints[latest_stage])
+    return latest_stage, latest, stale_stages
+
+
 def _load_checkpoint(filename: str):
     """
     Unpickle TransportProcesses object from a checkpoint file
@@ -538,9 +576,12 @@ def write_datapack(results_dir: str, out_file: Optional[str] = None, include_eve
     report = _ProgressReporter(progress, {"checkpoints": 1, "superclusters": 6, "clusters": 2, "assembly": 2})
     report("checkpoints", 0, 1, "Loading checkpoints")
 
-    checkpoints = find_checkpoints(results_dir)
+    all_checkpoints = find_checkpoints(results_dir)
+    checkpoints = dict(all_checkpoints)
+    stale_stages: List[int] = list()
     if stage is not None:  # ignore checkpoints left by previous runs of later stages
         checkpoints = {stage_id: filename for stage_id, filename in checkpoints.items() if stage_id <= stage}
+        stale_stages = sorted(stage_id for stage_id in all_checkpoints if stage_id > stage)
     finished_stages = sorted(stage_id for stage_id in checkpoints if stage_id >= 5)
     if stage is not None and transport_processes is not None and stage not in finished_stages:
         finished_stages = sorted(finished_stages + [stage])
@@ -548,11 +589,15 @@ def write_datapack(results_dir: str, out_file: Optional[str] = None, include_eve
         raise RuntimeError("No checkpoint of stage 5 or later found in '{}', datapack cannot be created".format(
             os.path.join(results_dir, "_internal", "checkpoints")))
 
-    latest_stage = finished_stages[-1]
-    if transport_processes is not None and stage == latest_stage:
-        latest = transport_processes
+    if transport_processes is not None and stage == finished_stages[-1]:
+        latest_stage, latest = stage, transport_processes  # current within a running TransportTools job
     else:
-        latest = _load_checkpoint(checkpoints[latest_stage])
+        latest_stage, latest, stale = _newest_current_checkpoint(checkpoints, finished_stages)
+        if stale:
+            logger.warning("Checkpoints of stages {} were left by an earlier run of stage 5 and are ignored; re-run "
+                           "these stages to include their results".format(", ".join(map(str, stale))))
+            finished_stages = [stage_id for stage_id in finished_stages if stage_id not in stale]
+            stale_stages = sorted(stale_stages + stale)
 
     parameters = latest.parameters
     paths = _ResultsPaths(results_dir, parameters)
@@ -662,9 +707,9 @@ def write_datapack(results_dir: str, out_file: Optional[str] = None, include_eve
         # --- assembly
         report("assembly", 0, 1, "Assembling datapack")
         tmp_out_file = os.path.join(tmp_dir, "datapack.tmp")
-        _assemble(tmp_out_file, results_dir, paths, latest, latest_stage, finished_stages, checkpoints, parameters,
-                  md_labels, labels, groups, result_sets, sc_ids, sc_results, md_results, events_assigned,
-                  event_records, event_resnames, include_events,
+        _assemble(tmp_out_file, results_dir, paths, latest, latest_stage, finished_stages, stale_stages,
+                  all_checkpoints, parameters, md_labels, labels, groups, result_sets, sc_ids, sc_results, md_results,
+                  events_assigned, event_records, event_resnames, include_events,
                   lambda done, total: report("assembly", done, total, "Assembling datapack"))
         os.replace(tmp_out_file, out_file)
     finally:
@@ -676,10 +721,10 @@ def write_datapack(results_dir: str, out_file: Optional[str] = None, include_eve
 
 
 def _assemble(tmp_out_file: str, results_dir: str, paths: _ResultsPaths, latest, latest_stage: int,
-              finished_stages: List[int], checkpoints: Dict[int, str], parameters: dict, md_labels: List[str],
-              labels: List[str], groups: Optional[Dict[str, List[str]]], result_sets: List[dict], sc_ids: List[int],
-              sc_results: List[Dict[str, Any]], md_results: List[Dict[str, Any]], events_assigned: bool,
-              event_records: list, event_resnames: List[str], include_events: bool,
+              finished_stages: List[int], stale_stages: List[int], all_checkpoints: Dict[int, str], parameters: dict,
+              md_labels: List[str], labels: List[str], groups: Optional[Dict[str, List[str]]], result_sets: List[dict],
+              sc_ids: List[int], sc_results: List[Dict[str, Any]], md_results: List[Dict[str, Any]],
+              events_assigned: bool, event_records: list, event_resnames: List[str], include_events: bool,
               report: Callable[[int, int], None]):
     """
     Writes datapack archive from converted data
@@ -858,8 +903,10 @@ def _assemble(tmp_out_file: str, results_dir: str, paths: _ResultsPaths, latest,
                 "results_dir": results_dir,
                 "latest_stage": latest_stage,
                 "finished_stages": finished_stages,
-                "checkpoint_mtimes": {str(stage_id): os.path.getmtime(checkpoints[stage_id])
-                                      for stage_id in finished_stages if stage_id in checkpoints},
+                "stale_stages": stale_stages,
+                # every checkpoint of stage 5 or later, also stale ones, so that readers can tell if the folder changed
+                "checkpoint_mtimes": {str(stage_id): os.path.getmtime(filename)
+                                      for stage_id, filename in all_checkpoints.items() if stage_id >= 5},
             },
             "parameters": exported_parameters,
             "md_labels": md_labels,

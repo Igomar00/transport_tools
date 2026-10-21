@@ -126,6 +126,28 @@ class TestDatapackHelpers(unittest.TestCase):
         self.assertEqual(assignments.tolist(), [[1, 0, 0, 1, 0], [2, 0, 0, 1, 0], [2, 0, 1, 1, 1], [2, 1, 0, 0, 3]])
         self.assertEqual(datapack._event_assignments([], {}).shape, (0, 5))
 
+    def test_stale_checkpoints_of_an_earlier_stage5_run_are_skipped(self):
+        def run(clusters):
+            return SimpleNamespace(_super_clusters={sc_id: SimpleNamespace(tunnel_clusters_valid={
+                md: {cls_id: True for cls_id in ids} for md, ids in mds.items()}) for sc_id, mds in clusters.items()})
+
+        old_run = run({1: {"md1": [1, 2]}, 2: {"md1": [3]}})
+        new_run = run({1: {"md1": [1]}, 2: {"md1": [2, 3]}})
+        filtered = run({1: {"md1": [1]}, 2: {"md1": [2, 3]}})
+        filtered._super_clusters[2].tunnel_clusters_valid["md1"][3] = False  # filtering changes only validity
+        self.assertEqual(datapack.supercluster_fingerprint(filtered), datapack.supercluster_fingerprint(new_run))
+        checkpoints = {stage: "stage{:03d}".format(stage) for stage in (5, 6, 7, 10)}
+        files = {"stage005": new_run, "stage006": filtered, "stage007": old_run, "stage010": old_run}
+        stage, latest, stale = datapack._newest_current_checkpoint(checkpoints, [5, 6, 7, 10], files.__getitem__)
+        self.assertEqual((stage, stale), (6, [7, 10]))
+        self.assertIs(latest, filtered)
+        files["stage006"] = old_run
+        stage, latest, stale = datapack._newest_current_checkpoint(checkpoints, [5, 6, 7, 10], files.__getitem__)
+        self.assertEqual((stage, stale), (5, [6, 7, 10]))
+        self.assertIs(latest, new_run)
+        files.update(stage006=filtered, stage007=filtered, stage010=filtered)
+        self.assertEqual(datapack._newest_current_checkpoint(checkpoints, [5, 6, 7, 10], files.__getitem__)[2], [])
+
     def test_jsonable(self):
         value = datapack._jsonable({"a": {"x", "y"}, 1: np.int64(3), "f": np.float32(0.5), "arr": np.arange(2),
                                     "t": (np.bool_(True), None)})
