@@ -3533,6 +3533,19 @@ class TransportProcesses:
                                    "wb") as out_stream:
                         pickle.dump(ordered, out_stream, self.parameters["pickle_protocol"])
 
+    def export_datapack(self, stage: int):
+        """
+        Save TTviz datapack summarizing results available so far, see transport_tools.libs.datapack
+        :param stage: stage that has just been finished
+        """
+
+        from transport_tools.libs.datapack import write_datapack
+
+        with TimeProcess("Datapack export"):
+            logger.info("Exporting TTviz datapack.")
+            write_datapack(self.parameters["output_path"], include_events=self.parameters["datapack_include_events"],
+                           num_processes=self.parameters["num_cpus"], transport_processes=self, stage=stage)
+
     def get_property_time_evolution_data(self, property_name: str, active_filters: dict, sc_id: int | None = None,
                                          missing_value_default: float = 0) -> Dict[int, Dict[str, np.ndarray]]:
         """

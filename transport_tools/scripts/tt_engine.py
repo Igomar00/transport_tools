@@ -169,6 +169,8 @@ if __name__ == "__main__":
         mol_system.save_super_clusters_visualization(script_name="1-visualize_initial_tunnels.py")
         save_checkpoint(mol_system, join(checkpoints_path, "stage{:03d}.dump".format(current_stage)),
                         overwrite=overwrite)
+        if mol_system.parameters.get("export_datapack"):
+            mol_system.export_datapack(current_stage)
     else:
         logger.info("Requested to start from STAGE %d => skipping STAGE %d", start_from_stage, current_stage)
 
@@ -191,6 +193,8 @@ if __name__ == "__main__":
         mol_system.save_super_clusters_visualization(script_name="2-visualize_filtered_tunnels.py")
         save_checkpoint(mol_system, join(checkpoints_path, "stage{:03d}.dump".format(current_stage)),
                         overwrite=overwrite)
+        if mol_system.parameters.get("export_datapack"):
+            mol_system.export_datapack(current_stage)
     else:
         logger.info("Requested to start from STAGE %d => skipping STAGE %d", start_from_stage, current_stage)
 
@@ -278,5 +282,7 @@ if __name__ == "__main__":
             mol_system.generate_super_cluster_summary(out_filename="4-filtered_events_statistics.txt")
             save_checkpoint(mol_system, join(checkpoints_path, "stage{:03d}.dump".format(current_stage)),
                             overwrite=overwrite)
+            if mol_system.parameters.get("export_datapack"):
+                mol_system.export_datapack(current_stage)
         else:
             logger.info("Requested to start from STAGE %d => skipping STAGE %d", start_from_stage, current_stage)

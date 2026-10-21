@@ -292,7 +292,10 @@ class AnalysisConfig:
             # Optional visualization
             "visualize_super_cluster_volumes": False,
             "visualize_transformed_tunnels": False,
-            "visualize_transformed_transport_events": False
+            "visualize_transformed_transport_events": False,
+            # Compact datapack for the TTviz Lite PyMOL plugin, written after stages 5, 6 and 10
+            "export_datapack": False,
+            "datapack_include_events": False  # include transport event records and their layered geometry
         }
 
         self.advanced_settings = {
@@ -421,6 +424,8 @@ class AnalysisConfig:
             "visualize_comparative_super_cluster_volumes",
             "visualize_transformed_tunnels",
             "visualize_transformed_transport_events",
+            "export_datapack",
+            "datapack_include_events",
             "visualize_layered_clusters",
             "visualize_layered_events",
             "bundle_events_visualization",
@@ -1810,6 +1815,7 @@ class AnalysisConfig:
                                 "(-1 => inactive filter)",
             "save_super_cluster_profiles_csvs": "# Optional data generation",
             "visualize_super_cluster_volumes": "# Optional visualization",
+            "export_datapack": "# Optional datapack for TTviz Lite PyMOL plugin (written after stages 5, 6 and 10)",
             "random_seed": "# Calculations",
             "visualize_exact_matching_outcomes": "# Finer control of outputs & logging",
             "prune_tunnels_bin_size": "# Tuning of tunnel-profile pruning (used when 'prune_tunnels = True')"
