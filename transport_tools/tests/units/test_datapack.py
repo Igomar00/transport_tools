@@ -117,6 +117,15 @@ class TestDatapackHelpers(unittest.TestCase):
         self.assertEqual(records, [(2, 0, 0, "WAT", 12, 1, 9, "5"), (2, 1, 1, "U01", 1, 3, 4, "7"),
                                    (-1, 0, 1, "WAT", 3, 5, 6, "9")])
 
+    def test_event_assignments_identify_shared_events(self):
+        # event "5" (md 0, entry) is assigned to superclusters 1 and 2; "5" released in md 0 and "5" in md 1 differ
+        records = [(1, 0, 0, "WAT", 12, 1, 9, "5"), (2, 0, 0, "WAT", 12, 1, 9, "5"), (2, 0, 1, "WAT", 12, 9, 11, "5"),
+                   (2, 1, 0, "U01", 1, 3, 4, "5"), (-1, 0, 1, "WAT", 3, 5, 6, "9")]
+        assignments = datapack._event_assignments(records, {"U01": 0, "WAT": 1})
+        self.assertEqual(assignments.dtype, np.int32)
+        self.assertEqual(assignments.tolist(), [[1, 0, 0, 1, 0], [2, 0, 0, 1, 0], [2, 0, 1, 1, 1], [2, 1, 0, 0, 3]])
+        self.assertEqual(datapack._event_assignments([], {}).shape, (0, 5))
+
     def test_jsonable(self):
         value = datapack._jsonable({"a": {"x", "y"}, 1: np.int64(3), "f": np.float32(0.5), "arr": np.arange(2),
                                     "t": (np.bool_(True), None)})

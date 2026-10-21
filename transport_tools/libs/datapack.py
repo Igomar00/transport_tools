@@ -497,6 +497,24 @@ def _collect_events(super_clusters: Dict[int, Any], outliers, md_indices: Dict[s
     return records, resnames
 
 
+def _event_assignments(event_records: list, resname_indices: Dict[str, int]) -> np.ndarray:
+    """
+    Lists assignments of transport events to superclusters with an identifier of each distinct event, so that events
+    assigned to several superclusters can be counted once when superclusters are merged
+    :param event_records: records from _collect_events
+    :param resname_indices: residue name -> index in the table of residue names
+    :return: int32 array (A, 5) of (sc_id, md index, event type index, resname index, event ID) of assigned events,
+             event IDs number the distinct (md index, AQUA-DUCT path ID, event type) triples
+    """
+
+    event_ids: Dict[Tuple[int, str, int], int] = dict()
+    for key in sorted({(record[1], record[7], record[2]) for record in event_records}):
+        event_ids[key] = len(event_ids)
+    rows = sorted((record[0], record[1], record[2], resname_indices[record[3]],
+                   event_ids[(record[1], record[7], record[2])]) for record in event_records if record[0] >= 0)
+    return np.asarray(rows, dtype=np.int32).reshape(-1, 5)
+
+
 def write_datapack(results_dir: str, out_file: Optional[str] = None, include_events: bool = False,
                    num_processes: int = 1, progress: Optional[ProgressCallback] = None,
                    transport_processes=None, stage: Optional[int] = None) -> str:
@@ -809,6 +827,7 @@ def _assemble(tmp_out_file: str, results_dir: str, paths: _ResultsPaths, latest,
                 counts[key] = counts.get(key, 0) + 1
             event_counts = [(*key, count) for key, count in sorted(counts.items())]
             writer.write_array("events/counts.npy", np.asarray(event_counts, dtype=np.int32).reshape(-1, 5))
+            writer.write_array("events/assignments.npy", _event_assignments(event_records, resname_indices))
             if include_events:
                 columns = [(record[0], record[1], record[2], resname_indices[record[3]], record[4], record[5],
                             record[6]) for record in event_records]
@@ -854,6 +873,7 @@ def _assemble(tmp_out_file: str, results_dir: str, paths: _ResultsPaths, latest,
             "events": {
                 "assigned": events_assigned,
                 "records_included": bool(events_assigned and include_events),
+                "assignments_included": events_assigned,
                 "types": list(EVENT_TYPES),
                 "resnames": event_resnames,
                 "outliers": outliers,
