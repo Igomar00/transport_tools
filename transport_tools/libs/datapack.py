@@ -58,6 +58,7 @@ EVENT_TYPES = ("entry", "release")
 
 XYZ_SCALE = 0.01  # Angstrom per int16 step of quantized sphere coordinates
 RADIUS_SCALE = 0.001  # Angstrom per uint16 step of quantized sphere radii
+LENGTH_SCALE = 0.01  # Angstrom per uint16 step of quantized sphere positions along the tunnel
 
 PATHSET_KIND_SUPERCLUSTER = 0
 PATHSET_KIND_CLUSTER = 1
@@ -259,6 +260,29 @@ class _PathsetChunk:
                 "num_paths": int(num_paths.sum()), "num_path_nodes": int(arrays["paths"].shape[0])}
 
 
+def _sphere_encoding(max_abs_xyz: float, max_radius: float, min_length: float, max_length: float) \
+        -> Dict[str, Dict[str, Any]]:
+    """
+    Storage of sphere coordinates, radii and lengths: quantized integers when the values fit, else float32
+    :param max_abs_xyz: largest absolute sphere coordinate
+    :param max_radius: largest sphere radius
+    :param min_length: smallest sphere position along its tunnel
+    :param max_length: largest sphere position along its tunnel
+    :return: {member: {dtype, scale}} for xyz, radius and length
+    """
+
+    quantize_xyz = max_abs_xyz / XYZ_SCALE < np.iinfo(np.int16).max - 1
+    quantize_radius = max_radius / RADIUS_SCALE < np.iinfo(np.uint16).max - 1
+    quantize_length = min_length >= 0 and max_length / LENGTH_SCALE < np.iinfo(np.uint16).max - 1
+    return {
+        "xyz": {"dtype": "int16", "scale": XYZ_SCALE} if quantize_xyz else {"dtype": "float32", "scale": 1.},
+        "radius": ({"dtype": "uint16", "scale": RADIUS_SCALE} if quantize_radius
+                   else {"dtype": "float32", "scale": 1.}),
+        "length": ({"dtype": "uint16", "scale": LENGTH_SCALE} if quantize_length
+                   else {"dtype": "float32", "scale": 1.}),
+    }
+
+
 def _process_super_cluster_worker(task: Tuple[int, str, str, Dict[str, int], List[str], str]) -> Dict[str, Any]:
     """
     Converts initial profile and pathsets of a single supercluster into arrays saved in the temporary folder
@@ -291,7 +315,8 @@ def _process_super_cluster_worker(task: Tuple[int, str, str, Dict[str, int], Lis
             else:
                 bottleneck_xyz.append(tuple(tunnel.bottleneck_xyz[:3]))
             num_spheres.append(tunnel.spheres_data.shape[0])
-            spheres.append(np.asarray(tunnel.spheres_data[:, [0, 1, 2, 4]], dtype=np.float32))
+            # x, y, z, radius, length (position along the tunnel from the starting point, CAVER profile)
+            spheres.append(np.asarray(tunnel.spheres_data[:, [0, 1, 2, 4, 5]], dtype=np.float32))
             num_residues.append(len(tunnel.bottleneck_residues))
             residues.extend(tunnel.bottleneck_residues)
     del profile
@@ -303,7 +328,7 @@ def _process_super_cluster_worker(task: Tuple[int, str, str, Dict[str, int], Lis
         "scalars": np.asarray(scalars, dtype=np.float64).reshape(-1, 5),
         "bottleneck_xyz": np.asarray(bottleneck_xyz, dtype=np.float32).reshape(-1, 3),
         "num_spheres": np.asarray(num_spheres, dtype=np.int64),
-        "spheres": np.concatenate(spheres) if spheres else np.zeros((0, 4), dtype=np.float32),
+        "spheres": np.concatenate(spheres) if spheres else np.zeros((0, 5), dtype=np.float32),
         "num_residues": np.asarray(num_residues, dtype=np.int64),
         "residues": np.asarray(residue_indices, dtype=np.int32),
     }
@@ -320,6 +345,8 @@ def _process_super_cluster_worker(task: Tuple[int, str, str, Dict[str, int], Lis
         "residue_table": residue_table.tolist(),
         "max_abs_xyz": float(np.abs(sphere_data[:, :3]).max()) if sphere_data.shape[0] else 0.,
         "max_radius": float(sphere_data[:, 3].max()) if sphere_data.shape[0] else 0.,
+        "min_length": float(sphere_data[:, 4].min()) if sphere_data.shape[0] else 0.,
+        "max_length": float(sphere_data[:, 4].max()) if sphere_data.shape[0] else 0.,
         "pathset_labels": list(),
     }
 
@@ -747,28 +774,16 @@ def _assemble(tmp_out_file: str, results_dir: str, paths: _ResultsPaths, latest,
         num_residues = sum(result["num_residues"] for result in sc_results)
         max_abs_xyz = max([result["max_abs_xyz"] for result in sc_results] + [0.])
         max_radius = max([result["max_radius"] for result in sc_results] + [0.])
+        min_length = min([result["min_length"] for result in sc_results] + [0.])
+        max_length = max([result["max_length"] for result in sc_results] + [0.])
+        encoding = _sphere_encoding(max_abs_xyz, max_radius, min_length, max_length)
 
-        quantize_xyz = max_abs_xyz / XYZ_SCALE < np.iinfo(np.int16).max - 1
-        quantize_radius = max_radius / RADIUS_SCALE < np.iinfo(np.uint16).max - 1
-        encoding = {
-            "xyz": {"dtype": "int16", "scale": XYZ_SCALE} if quantize_xyz else {"dtype": "float32", "scale": 1.},
-            "radius": ({"dtype": "uint16", "scale": RADIUS_SCALE} if quantize_radius
-                       else {"dtype": "float32", "scale": 1.}),
-        }
-
-        def _xyz_chunks():
+        def _sphere_chunks(columns, member: str):
+            dtype, scale = np.dtype(encoding[member]["dtype"]), encoding[member]["scale"]
             for result in sc_results:
-                data = _load(result["prefix"], "spheres")[:, :3]
-                if quantize_xyz:
-                    yield np.rint(data / XYZ_SCALE).astype(np.int16)
-                else:
-                    yield np.asarray(data, dtype=np.float32)
-
-        def _radius_chunks():
-            for result in sc_results:
-                data = _load(result["prefix"], "spheres")[:, 3]
-                if quantize_radius:
-                    yield np.rint(data / RADIUS_SCALE).astype(np.uint16)
+                data = _load(result["prefix"], "spheres")[:, columns]
+                if dtype.kind in "iu":
+                    yield np.rint(data / scale).astype(dtype)
                 else:
                     yield np.asarray(data, dtype=np.float32)
 
@@ -799,8 +814,10 @@ def _assemble(tmp_out_file: str, results_dir: str, paths: _ResultsPaths, latest,
             ("tunnels/bottleneck_xyz.npy", np.float32, (num_tunnels, 3),
              _column_chunks("bottleneck_xyz", slice(None))),
             ("tunnels/sphere_offsets.npy", np.int64, (num_tunnels + 1,), _offsets("num_spheres")),
-            ("tunnels/xyz.npy", np.dtype(encoding["xyz"]["dtype"]), (num_spheres, 3), _xyz_chunks()),
-            ("tunnels/radius.npy", np.dtype(encoding["radius"]["dtype"]), (num_spheres,), _radius_chunks()),
+            ("tunnels/xyz.npy", np.dtype(encoding["xyz"]["dtype"]), (num_spheres, 3),
+             _sphere_chunks(slice(0, 3), "xyz")),
+            ("tunnels/radius.npy", np.dtype(encoding["radius"]["dtype"]), (num_spheres,), _sphere_chunks(3, "radius")),
+            ("tunnels/length.npy", np.dtype(encoding["length"]["dtype"]), (num_spheres,), _sphere_chunks(4, "length")),
             ("tunnels/residue_offsets.npy", np.int64, (num_tunnels + 1,), _offsets("num_residues")),
             ("tunnels/residues.npy", np.int32, (num_residues,), _residue_chunks()),
         ]

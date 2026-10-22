@@ -148,6 +148,16 @@ class TestDatapackHelpers(unittest.TestCase):
         files.update(stage006=filtered, stage007=filtered, stage010=filtered)
         self.assertEqual(datapack._newest_current_checkpoint(checkpoints, [5, 6, 7, 10], files.__getitem__)[2], [])
 
+    def test_sphere_encoding(self):
+        encoding = datapack._sphere_encoding(120.0, 3.5, 0.2, 80.0)
+        self.assertEqual(encoding, {"xyz": {"dtype": "int16", "scale": datapack.XYZ_SCALE},
+                                    "radius": {"dtype": "uint16", "scale": datapack.RADIUS_SCALE},
+                                    "length": {"dtype": "uint16", "scale": datapack.LENGTH_SCALE}})
+        encoding = datapack._sphere_encoding(400.0, 70.0, -0.5, 80.0)  # out of range or negative: float32
+        for member in ("xyz", "radius", "length"):
+            self.assertEqual(encoding[member], {"dtype": "float32", "scale": 1.})
+        self.assertEqual(datapack._sphere_encoding(1.0, 1.0, 0.0, 700.0)["length"]["dtype"], "float32")
+
     def test_jsonable(self):
         value = datapack._jsonable({"a": {"x", "y"}, 1: np.int64(3), "f": np.float32(0.5), "arr": np.arange(2),
                                     "t": (np.bool_(True), None)})
