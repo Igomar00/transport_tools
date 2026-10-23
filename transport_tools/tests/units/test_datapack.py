@@ -123,8 +123,16 @@ class TestDatapackHelpers(unittest.TestCase):
                    (2, 1, 0, "U01", 1, 3, 4, "5"), (-1, 0, 1, "WAT", 3, 5, 6, "9")]
         assignments = datapack._event_assignments(records, {"U01": 0, "WAT": 1})
         self.assertEqual(assignments.dtype, np.int32)
-        self.assertEqual(assignments.tolist(), [[1, 0, 0, 1, 0], [2, 0, 0, 1, 0], [2, 0, 1, 1, 1], [2, 1, 0, 0, 3]])
+        self.assertEqual(assignments.tolist(), [[1, 0, 0, 1, 0], [2, 0, 0, 1, 0], [2, 0, 1, 1, 2], [2, 1, 0, 0, 3]])
         self.assertEqual(datapack._event_assignments([], {}).shape, (0, 5))
+
+    def test_event_assignments_tell_water_and_ligand_events_apart(self):
+        # AQUA-DUCT numbers paths per run, one run per traced ligand: water and ligand path "1" of md 0 are two events
+        records = [(1, 0, 0, "WAT", 12, 1, 9, "1"), (1, 0, 0, "U01", 301, 40, 52, "1"),
+                   (2, 0, 0, "U01", 301, 40, 52, "1")]
+        assignments = datapack._event_assignments(records, {"U01": 0, "WAT": 1})
+        self.assertEqual(assignments.tolist(), [[1, 0, 0, 0, 0], [1, 0, 0, 1, 1], [2, 0, 0, 0, 0]])
+        self.assertEqual(len(datapack.EVENT_IDENTITY), len(datapack._event_identity(records[0])))
 
     def test_stale_checkpoints_of_an_earlier_stage5_run_are_skipped(self):
         def run(clusters):
