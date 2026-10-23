@@ -38,6 +38,7 @@ import os
 import json
 import glob
 import shutil
+import hashlib
 import pickle
 import struct
 import zipfile
@@ -136,10 +137,74 @@ def supercluster_fingerprint(transport_processes) -> Dict[int, Dict[str, Tuple[i
             for sc_id, super_cluster in transport_processes._super_clusters.items()}
 
 
+# what checkpoint_signature compares between consecutive checkpoints
+STALE_CHECKS = ["superclusters", "filtering", "events"]
+
+
+def _digest(value: Any) -> str:
+    return hashlib.sha1(repr(value).encode("utf-8")).hexdigest()
+
+
+def _event_list(transport_events: dict) -> List[Tuple[str, str, str, str, Tuple[int, ...]]]:
+    return sorted((event_type, md_label, str(path_id), str(traced_event[0]), tuple(int(i) for i in traced_event[1]))
+                  for event_type, events4md in transport_events.items() for md_label, events in events4md.items()
+                  for path_id, traced_event in events)
+
+
+def checkpoint_signature(transport_processes) -> Dict[str, str]:
+    """
+    Digests of the state that later stages of TransportTools carry over unchanged, to tell if a checkpoint follows from
+    the checkpoint of the stage before it: the tunnel clusters of superclusters (set at stage 5), the filters with
+    the validity flags of tunnel clusters (set at stage 6; stages 7-9 do not filter), and the transport events
+    (assigned at stage 9; stage 10 only filters)
+    :param transport_processes: TransportProcesses object from a checkpoint
+    :return: {"superclusters": digest, "filtering": digest, "events": digest}
+    """
+
+    super_clusters = transport_processes._super_clusters
+    validity = sorted((int(sc_id), md_label, int(cls_id), bool(valid))
+                      for sc_id, super_cluster in super_clusters.items()
+                      for md_label, clusters in super_cluster.tunnel_clusters_valid.items()
+                      for cls_id, valid in clusters.items())
+    events = [(int(sc_id), _event_list(super_clusters[sc_id].transport_events)) for sc_id in sorted(super_clusters)]
+    outliers = getattr(transport_processes, "_outlier_transport_events", None)
+    if outliers is not None:
+        events.append(("outliers", _event_list(outliers.transport_events),
+                       _event_list(outliers.transport_events_global)))
+    return {
+        "superclusters": _digest(sorted((sc_id, sorted(mds.items()))
+                                        for sc_id, mds in supercluster_fingerprint(transport_processes).items())),
+        "filtering": _digest((json.dumps(_jsonable(transport_processes._active_filters), sort_keys=True), validity)),
+        "events": _digest(events),
+    }
+
+
+def stale_checkpoint_reason(stage: int, signature: Dict[str, str], previous_stage: int,
+                            previous_signature: Dict[str, str]) -> Optional[str]:
+    """
+    Tells if the checkpoint of a stage was left by an earlier run, i.e. does not follow from the checkpoint of the
+    previous stage present (TransportTools keeps the checkpoints of later stages when restarted at an earlier stage)
+    :param stage: stage of the checked checkpoint
+    :param signature: its checkpoint_signature
+    :param previous_stage: the nearest earlier stage with a checkpoint
+    :param previous_signature: its checkpoint_signature
+    :return: why the checkpoint is stale, or None if it follows from the previous one
+    """
+
+    if stage >= 6 and signature["superclusters"] != previous_signature["superclusters"]:
+        return "its superclusters differ from those of stage {}".format(previous_stage)
+    if 7 <= stage <= 9 and previous_stage >= 6 and signature["filtering"] != previous_signature["filtering"]:
+        return "its filters differ from those of stage {} (stages 7-9 do not filter)".format(previous_stage)
+    if stage == 10 and previous_stage == 9 and signature["events"] != previous_signature["events"]:
+        return "its transport events differ from those of stage 9 (stage 10 does not assign events)"
+    return None
+
+
 def _newest_current_checkpoint(checkpoints: Dict[int, str], finished_stages: List[int],
                                load: Callable[[str], Any] = None) -> Tuple[int, Any, List[int]]:
     """
-    Finds the newest checkpoint describing the current superclusters (fingerprint of the stage-5 checkpoint)
+    Finds the newest checkpoint of an unbroken chain of current checkpoints: starting from the oldest, each one must
+    follow from the one before it (stale_checkpoint_reason); the first that does not and all later ones are stale
     :param checkpoints: stage -> checkpoint file
     :param finished_stages: sorted stages from 5 on to consider
     :param load: function loading a checkpoint file (default: _load_checkpoint)
@@ -147,17 +212,20 @@ def _newest_current_checkpoint(checkpoints: Dict[int, str], finished_stages: Lis
     """
 
     load = load or _load_checkpoint
-    latest_stage = finished_stages[-1]
+    latest_stage = finished_stages[0]
     latest = load(checkpoints[latest_stage])
-    stale_stages = list()
-    if latest_stage > 5 and 5 in checkpoints:
-        stage5 = load(checkpoints[5])
-        reference = supercluster_fingerprint(stage5)
-        while latest_stage > 5 and supercluster_fingerprint(latest) != reference:
-            stale_stages.insert(0, latest_stage)
-            latest_stage = finished_stages[finished_stages.index(latest_stage) - 1]
-            latest = stage5 if latest_stage == 5 else load(checkpoints[latest_stage])
-    return latest_stage, latest, stale_stages
+    signature = checkpoint_signature(latest)
+    for index, stage in enumerate(finished_stages[1:], start=1):
+        loaded = load(checkpoints[stage])
+        loaded_signature = checkpoint_signature(loaded)
+        reason = stale_checkpoint_reason(stage, loaded_signature, latest_stage, signature)
+        if reason is not None:
+            stale_stages = finished_stages[index:]
+            logger.warning("Checkpoint of stage {} was left by an earlier run: {}. Checkpoints from stage {} on are "
+                           "ignored; re-run these stages to include their results".format(stage, reason, stage))
+            return latest_stage, latest, stale_stages
+        latest_stage, latest, signature = stage, loaded, loaded_signature
+    return latest_stage, latest, list()
 
 
 def _load_checkpoint(filename: str):
@@ -637,8 +705,6 @@ def write_datapack(results_dir: str, out_file: Optional[str] = None, include_eve
     else:
         latest_stage, latest, stale = _newest_current_checkpoint(checkpoints, finished_stages)
         if stale:
-            logger.warning("Checkpoints of stages {} were left by an earlier run of stage 5 and are ignored; re-run "
-                           "these stages to include their results".format(", ".join(map(str, stale))))
             finished_stages = [stage_id for stage_id in finished_stages if stage_id not in stale]
             stale_stages = sorted(stale_stages + stale)
 
@@ -937,6 +1003,8 @@ def _assemble(tmp_out_file: str, results_dir: str, paths: _ResultsPaths, latest,
                 "latest_stage": latest_stage,
                 "finished_stages": finished_stages,
                 "stale_stages": stale_stages,
+                # how stale checkpoints were recognized (stale_checkpoint_reason): each one checked against the previous
+                "stale_checks": STALE_CHECKS,
                 # every checkpoint of stage 5 or later, also stale ones, so that readers can tell if the folder changed
                 "checkpoint_mtimes": {str(stage_id): os.path.getmtime(filename)
                                       for stage_id, filename in all_checkpoints.items() if stage_id >= 5},

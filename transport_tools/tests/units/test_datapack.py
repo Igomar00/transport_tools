@@ -136,8 +136,9 @@ class TestDatapackHelpers(unittest.TestCase):
 
     def test_stale_checkpoints_of_an_earlier_stage5_run_are_skipped(self):
         def run(clusters):
-            return SimpleNamespace(_super_clusters={sc_id: SimpleNamespace(tunnel_clusters_valid={
-                md: {cls_id: True for cls_id in ids} for md, ids in mds.items()}) for sc_id, mds in clusters.items()})
+            return SimpleNamespace(_active_filters={}, _super_clusters={sc_id: SimpleNamespace(
+                tunnel_clusters_valid={md: {cls_id: True for cls_id in ids} for md, ids in mds.items()},
+                transport_events={}) for sc_id, mds in clusters.items()})
 
         old_run = run({1: {"md1": [1, 2]}, 2: {"md1": [3]}})
         new_run = run({1: {"md1": [1]}, 2: {"md1": [2, 3]}})
@@ -155,6 +156,41 @@ class TestDatapackHelpers(unittest.TestCase):
         self.assertIs(latest, new_run)
         files.update(stage006=filtered, stage007=filtered, stage010=filtered)
         self.assertEqual(datapack._newest_current_checkpoint(checkpoints, [5, 6, 7, 10], files.__getitem__)[2], [])
+
+    def test_stale_checkpoints_of_later_stage_reruns_are_skipped(self):
+        """Re-running stage 6 (or 9) alone keeps the superclusters, so only the content carried over by later stages
+        tells their old checkpoints apart: stages 7-9 keep the filters and validity flags, stage 10 the events"""
+        import copy
+
+        def run(min_snapshots, valid, events=None):
+            events = events or {}
+            return SimpleNamespace(
+                _active_filters={"min_snapshots_num": min_snapshots}, _outlier_transport_events=None,
+                _super_clusters={1: SimpleNamespace(tunnel_clusters_valid={"md1": {1: True, 2: valid}},
+                                                    transport_events=events)})
+
+        assigned = {"entry": {"md1": [("1", ("WAT:7", (1, 3))), ("1", ("U01:301", (40, 52)))]}}
+        old = {5: run(-1, True), 6: run(1, True), 7: run(1, True), 9: run(1, True, assigned),
+               10: run(5, False, assigned)}
+        checkpoints = {stage: stage for stage in old}
+        stages = sorted(old)
+        self.assertEqual(datapack._newest_current_checkpoint(checkpoints, stages, old.__getitem__)[2], [])
+
+        rerun6 = {**old, 6: run(600, False)}  # stage 6 re-run alone with other filters
+        stage, latest, stale = datapack._newest_current_checkpoint(checkpoints, stages, rerun6.__getitem__)
+        self.assertEqual((stage, stale), (6, [7, 9, 10]))
+        self.assertIs(latest, rerun6[6])
+
+        moved = {"entry": {"md1": [("1", ("WAT:7", (1, 3)))]}}
+        rerun9 = {**old, 9: run(1, True, moved)}  # stage 9 re-run alone, e.g. another assignment cutoff
+        stage, latest, stale = datapack._newest_current_checkpoint(checkpoints, stages, rerun9.__getitem__)
+        self.assertEqual((stage, stale), (9, [10]))
+
+        reordered = copy.deepcopy(old)  # the order of events does not matter, only which events are held
+        reordered[10]._super_clusters[1].transport_events["entry"]["md1"].reverse()
+        self.assertEqual(datapack._newest_current_checkpoint(checkpoints, stages, reordered.__getitem__)[2], [])
+        self.assertIsNone(datapack.stale_checkpoint_reason(10, datapack.checkpoint_signature(old[10]), 7,
+                                                           datapack.checkpoint_signature(old[7])))
 
     def test_sphere_encoding(self):
         encoding = datapack._sphere_encoding(120.0, 3.5, 0.2, 80.0)
