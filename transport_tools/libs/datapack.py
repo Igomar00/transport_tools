@@ -55,6 +55,8 @@ logger = getLogger(__name__)
 DATAPACK_FORMAT = "ttviz-datapack"
 DATAPACK_VERSION = 1
 DEFAULT_DATAPACK_FILENAME = "ttviz.datapack"
+SUBSET_DATAPACK_FILENAME = "ttviz_subset.datapack"  # default for selected superclusters (TTviz Lite replaces the other)
+RESULT_SET_NAMES = ("initial", "filtered01", "filtered02")
 EVENT_TYPES = ("entry", "release")
 
 XYZ_SCALE = 0.01  # Angstrom per int16 step of quantized sphere coordinates
@@ -601,6 +603,98 @@ def _filters_from_checkpoint(transport_processes) -> Dict[str, Any]:
     return _jsonable(transport_processes._active_filters)
 
 
+def _prioritized_order(transport_processes) -> List[int]:
+    """
+    Superclusters that passed the filters of the stage that saved a checkpoint, in their priority order
+    (TransportTools' _prioritize_super_clusters, run at stages 5, 6 and 10)
+    :param transport_processes: TransportProcesses object from a checkpoint
+    :return: supercluster IDs, highest priority first
+    """
+
+    prioritized = getattr(transport_processes, "_prioritized_clusters", None) or dict()
+    return [int(prioritized[rank]) for rank in sorted(prioritized)]
+
+
+class SelectionError(ValueError):
+    """Superclusters requested for a datapack that the results do not have"""
+
+
+def parse_sc_ids(text: str) -> List[int]:
+    """
+    Supercluster IDs from a list of IDs and inclusive ranges such as '1-5,8,12'
+    :param text: comma-separated IDs and ranges
+    :return: sorted distinct IDs
+    """
+
+    sc_ids = set()
+    for part in text.replace(" ", "").split(","):
+        if not part:
+            continue
+        first, separator, last = part.partition("-")
+        if not first.isdigit() or (separator and not last.isdigit()):
+            raise SelectionError("Invalid supercluster ID or range '{}' (expected e.g. '1-5,8,12')".format(part))
+        low, high = int(first), int(last) if separator else int(first)
+        if high < low:
+            raise SelectionError("Invalid supercluster range '{}' (first ID larger than last)".format(part))
+        sc_ids.update(range(low, high + 1))
+    if not sc_ids:
+        raise SelectionError("No supercluster IDs given")
+    return sorted(sc_ids)
+
+
+def _select_super_clusters(all_sc_ids: List[int], orders: Dict[str, List[int]], superclusters: Optional[List[int]],
+                           result_set: Optional[str]) -> List[int]:
+    """
+    Superclusters to include in a datapack
+    :param all_sc_ids: IDs of all superclusters of the run
+    :param orders: result set name -> IDs of the superclusters passing its filters, in priority order
+    :param superclusters: requested IDs, or None for all
+    :param result_set: only superclusters passing the filters of this result set, or None
+    :return: sorted IDs of the selected superclusters
+    """
+
+    selected = set(all_sc_ids)
+    if superclusters is not None:
+        unknown = sorted(set(superclusters) - selected)
+        if unknown:
+            raise SelectionError("No supercluster with ID {} in the results (IDs {}-{})".format(
+                ", ".join(map(str, unknown)), all_sc_ids[0], all_sc_ids[-1]))
+        selected &= set(superclusters)
+    if result_set is not None:
+        if result_set not in orders:
+            raise SelectionError("Result set '{}' is not available in these results, only {}".format(
+                result_set, ", ".join(orders)))
+        if result_set != "initial":  # the initial set has no filters
+            selected &= set(orders[result_set])
+    if not selected:
+        raise SelectionError("No supercluster selected")
+    return sorted(selected)
+
+
+def _color_ranks(all_sc_ids: List[int], orders: Dict[str, List[int]], sc_ids: List[int]) -> Dict[str, Dict[str, int]]:
+    """
+    Position of selected superclusters in the colour order of each result set as TTviz Lite assigns colours to all
+    superclusters (the set's priority order, then superclusters failing its filters in the order of the initial set,
+    then the rest by ID), so that a datapack of selected superclusters keeps their colours
+    :param all_sc_ids: IDs of all superclusters of the run
+    :param orders: result set name -> IDs of the superclusters passing its filters, in priority order
+    :param sc_ids: IDs of the selected superclusters
+    :return: result set name -> {sc_id as string: rank from 0}
+    """
+
+    ranks = dict()
+    for name, order in orders.items():
+        color_order = list(order)
+        listed = set(color_order)
+        for sc_id in orders["initial"] + all_sc_ids:
+            if sc_id not in listed:
+                color_order.append(sc_id)
+                listed.add(sc_id)
+        position = {sc_id: rank for rank, sc_id in enumerate(color_order)}
+        ranks[name] = {str(sc_id): position[sc_id] for sc_id in sc_ids}
+    return ranks
+
+
 def _collect_events(super_clusters: Dict[int, Any], outliers, md_indices: Dict[str, int]) \
         -> Tuple[List[Tuple[int, int, int, str, int, int, int, str]], List[str]]:
     """
@@ -670,22 +764,30 @@ def _event_assignments(event_records: list, resname_indices: Dict[str, int]) -> 
 
 def write_datapack(results_dir: str, out_file: Optional[str] = None, include_events: bool = False,
                    num_processes: int = 1, progress: Optional[ProgressCallback] = None,
-                   transport_processes=None, stage: Optional[int] = None) -> str:
+                   transport_processes=None, stage: Optional[int] = None,
+                   superclusters: Optional[List[int]] = None, result_set: Optional[str] = None) -> str:
     """
     Creates datapack from TransportTools results folder (stage 5 or later must be finished)
     :param results_dir: path to the results folder (output_path of the run)
-    :param out_file: output datapack file; by default 'ttviz.datapack' in the results folder
+    :param out_file: output datapack file; by default 'ttviz.datapack' in the results folder, 'ttviz_subset.datapack'
+                     if superclusters are selected
     :param include_events: if transport event records and their layered geometry should be included
     :param num_processes: number of parallel processes used to convert dump files
     :param progress: optional function receiving (fraction done, message)
     :param transport_processes: TransportProcesses object of the latest finished stage, if already loaded
     :param stage: stage of the provided transport_processes object
+    :param superclusters: IDs of the superclusters to include (default: all)
+    :param result_set: include only superclusters passing the filters of this result set ('initial', 'filtered01',
+                       'filtered02'); combined with superclusters, those of the listed ones passing them
     :return: path to the created datapack
     """
 
     results_dir = os.path.abspath(results_dir)
+    selecting = superclusters is not None or result_set is not None
+    if superclusters is not None:
+        superclusters = sorted({int(sc_id) for sc_id in superclusters})
     if out_file is None:
-        out_file = os.path.join(results_dir, DEFAULT_DATAPACK_FILENAME)
+        out_file = os.path.join(results_dir, SUBSET_DATAPACK_FILENAME if selecting else DEFAULT_DATAPACK_FILENAME)
     out_file = os.path.abspath(out_file)
 
     report = _ProgressReporter(progress, {"checkpoints": 1, "superclusters": 6, "clusters": 2, "assembly": 2})
@@ -720,18 +822,33 @@ def write_datapack(results_dir: str, out_file: Optional[str] = None, include_eve
     # result sets: initial from stage 5, filtered01 from stage 6, filtered02 from stage 10; filters of the stage-6 set
     # are kept by checkpoints of stages 6-9
     result_sets = [{"name": "initial", "stage": 5, "filters": None, "consider_events": False}]
+    orders = dict()  # result set name -> superclusters passing its filters in priority order (selection, colours)
     if latest_stage >= 6:
         if latest_stage <= 9:
             stage6_filters = _filters_from_checkpoint(latest)
+            orders["filtered01"] = _prioritized_order(latest)
         else:
             stage6_checkpoint = [stage_id for stage_id in range(6, 10) if stage_id in checkpoints]
             if not stage6_checkpoint:
                 raise RuntimeError("Checkpoint from stages 6-9 is required to recover filters of stage 6")
-            stage6_filters = _filters_from_checkpoint(_load_checkpoint(checkpoints[stage6_checkpoint[0]]))
+            stage6 = _load_checkpoint(checkpoints[stage6_checkpoint[0]])
+            stage6_filters = _filters_from_checkpoint(stage6)
+            orders["filtered01"] = _prioritized_order(stage6)
+            del stage6
         result_sets.append({"name": "filtered01", "stage": 6, "filters": stage6_filters, "consider_events": False})
     if latest_stage >= 10:
         result_sets.append({"name": "filtered02", "stage": 10, "filters": _filters_from_checkpoint(latest),
                             "consider_events": True})
+        orders["filtered02"] = _prioritized_order(latest)
+    if selecting:  # the initial set's order is kept by the stage-5 checkpoint only
+        if latest_stage == 5:
+            orders["initial"] = _prioritized_order(latest)
+        elif 5 in checkpoints:
+            orders["initial"] = _prioritized_order(_load_checkpoint(checkpoints[5]))
+        else:
+            logger.warning("Checkpoint of stage 5 not found: superclusters failing the filters get colours by ID")
+            orders["initial"] = list()
+        orders = {name: orders[name] for name in RESULT_SET_NAMES if name in orders}
     report("checkpoints", 1, 1, "Checkpoints loaded")
 
     events_assigned = bool(getattr(latest, "_events_assigned", False))
@@ -751,6 +868,22 @@ def write_datapack(results_dir: str, out_file: Optional[str] = None, include_eve
 
     super_clusters = latest._super_clusters
     sc_ids = sorted(super_clusters.keys())
+    subset = None
+    if selecting:
+        all_sc_ids = sc_ids
+        sc_ids = _select_super_clusters(all_sc_ids, orders, superclusters, result_set)
+        subset = {
+            "num_superclusters": len(all_sc_ids),
+            "superclusters": superclusters,
+            "result_set": result_set,
+            # TTviz Lite colours of the selected superclusters among all of the run, per result set
+            "color_ranks": _color_ranks(all_sc_ids, orders, sc_ids),
+        }
+        logger.info("Packing {} of {} superclusters: {}".format(len(sc_ids), len(all_sc_ids),
+                                                                ", ".join(map(str, sc_ids))))
+        if out_file == os.path.join(results_dir, DEFAULT_DATAPACK_FILENAME):
+            logger.warning("TTviz Lite replaces '{}' with a datapack of all superclusters when it loads the results "
+                           "folder".format(out_file))
 
     tmp_dir = tempfile.mkdtemp(prefix=".ttviz_datapack_", dir=os.path.dirname(out_file))
     try:
@@ -780,8 +913,8 @@ def write_datapack(results_dir: str, out_file: Optional[str] = None, include_eve
         event_records: List[Tuple[int, int, int, str, int, int, int, str]] = list()
         event_resnames: List[str] = list()
         if events_assigned:
-            event_records, event_resnames = _collect_events(super_clusters, latest._outlier_transport_events,
-                                                            md_indices)
+            event_records, event_resnames = _collect_events({sc_id: super_clusters[sc_id] for sc_id in sc_ids},
+                                                            latest._outlier_transport_events, md_indices)
 
         # --- per-MD layered pathsets of tunnel clusters (and of events)
         clusters4md: Dict[str, set] = {md_label: set() for md_label in md_labels}
@@ -822,7 +955,7 @@ def write_datapack(results_dir: str, out_file: Optional[str] = None, include_eve
         tmp_out_file = os.path.join(tmp_dir, "datapack.tmp")
         _assemble(tmp_out_file, results_dir, paths, latest, latest_stage, finished_stages, stale_stages,
                   all_checkpoints, parameters, md_labels, labels, groups, result_sets, sc_ids, sc_results, md_results,
-                  events_assigned, event_records, event_resnames, include_events,
+                  events_assigned, event_records, event_resnames, include_events, subset,
                   lambda done, total: report("assembly", done, total, "Assembling datapack"))
         os.replace(tmp_out_file, out_file)
     finally:
@@ -838,7 +971,7 @@ def _assemble(tmp_out_file: str, results_dir: str, paths: _ResultsPaths, latest,
               md_labels: List[str], labels: List[str], groups: Optional[Dict[str, List[str]]], result_sets: List[dict],
               sc_ids: List[int], sc_results: List[Dict[str, Any]], md_results: List[Dict[str, Any]],
               events_assigned: bool, event_records: list, event_resnames: List[str], include_events: bool,
-              report: Callable[[int, int], None]):
+              subset: Optional[dict], report: Callable[[int, int], None]):
     """
     Writes datapack archive from converted data
     """
@@ -1032,6 +1165,8 @@ def _assemble(tmp_out_file: str, results_dir: str, paths: _ResultsPaths, latest,
                 "outliers": outliers,
             },
             "has_protein": has_protein,
+            # superclusters selected with tt_export_datapack.py (None: all superclusters of the run)
+            "subset": subset,
         }
         writer.write_bytes("manifest.json", json.dumps(manifest, indent=1).encode("utf-8"))
         report(total_members, total_members)
@@ -1039,15 +1174,27 @@ def _assemble(tmp_out_file: str, results_dir: str, paths: _ResultsPaths, latest,
         writer.close()
 
 
+def _sc_ids_argument(text: str) -> List[int]:
+    try:
+        return parse_sc_ids(text)
+    except SelectionError as error:
+        raise argparse.ArgumentTypeError(str(error))
+
+
 def init_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Create TTviz datapack from TransportTools results folder")
     parser.add_argument("results_dir", help="TransportTools results folder (output_path of the run)")
     parser.add_argument("-o", "--output", default=None,
-                        help="output datapack file (default: {} in the results folder)".format(
-                            DEFAULT_DATAPACK_FILENAME))
+                        help="output datapack file (default: {} in the results folder, {} with selected "
+                             "superclusters)".format(DEFAULT_DATAPACK_FILENAME, SUBSET_DATAPACK_FILENAME))
     parser.add_argument("-e", "--events", action="store_true",
                         help="include transport event records and their layered geometry")
     parser.add_argument("-n", "--num_cpus", type=int, default=1, help="number of parallel processes")
+    parser.add_argument("-s", "--superclusters", default=None, type=_sc_ids_argument,
+                        help="pack only these superclusters: IDs and ranges such as '1-5,8,12' (default: all)")
+    parser.add_argument("-r", "--result_set", default=None, choices=RESULT_SET_NAMES,
+                        help="pack only superclusters passing the filters of this result set (with --superclusters: "
+                             "those of the listed ones passing them)")
     parser.add_argument("--progress", action="store_true",
                         help="print machine-readable progress lines ('PROGRESS <fraction> <message>') to stdout")
     return parser
@@ -1056,14 +1203,19 @@ def init_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[List[str]] = None):
     import logging
 
-    args = init_parser().parse_args(argv)
+    parser = init_parser()
+    args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
     def _print_progress(fraction: float, message: str):
         print("PROGRESS {:.4f} {}".format(fraction, message), flush=True)
 
-    out_file = write_datapack(args.results_dir, args.output, include_events=args.events,
-                              num_processes=args.num_cpus, progress=_print_progress if args.progress else None)
+    try:
+        out_file = write_datapack(args.results_dir, args.output, include_events=args.events,
+                                  num_processes=args.num_cpus, progress=_print_progress if args.progress else None,
+                                  superclusters=args.superclusters, result_set=args.result_set)
+    except SelectionError as error:
+        parser.error(str(error))
     print("DONE {}".format(out_file), flush=True)
 
 

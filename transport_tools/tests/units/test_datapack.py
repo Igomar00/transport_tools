@@ -16,6 +16,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+import contextlib
 import io
 import os
 import shutil
@@ -112,6 +113,44 @@ class TestDatapackHelpers(unittest.TestCase):
         for name in ("caver_traj_offset", "caver_snapshot_stride", "interpolate_missing_snapshots4matching",
                      "snapshots_per_simulation", SnapshotFrameMap.MODE_KEY, SnapshotFrameMap.ID_STRIDE_KEY):
             self.assertIn(name, datapack._PARAMETERS2EXPORT)
+
+    def test_parse_sc_ids(self):
+        self.assertEqual(datapack.parse_sc_ids("1-3,8, 5,2"), [1, 2, 3, 5, 8])
+        self.assertEqual(datapack.parse_sc_ids("7"), [7])
+        for text in ("", "a", "1-", "-3", "5-2", "1.5", ","):
+            with self.assertRaises(datapack.SelectionError, msg=text):
+                datapack.parse_sc_ids(text)
+
+    def test_prioritized_order(self):
+        self.assertEqual(datapack._prioritized_order(SimpleNamespace(_prioritized_clusters={2: 5, 1: 3})), [3, 5])
+        self.assertEqual(datapack._prioritized_order(SimpleNamespace()), [])
+
+    def test_select_super_clusters(self):
+        orders = {"initial": [5, 1, 2, 3, 4], "filtered01": [4, 2]}
+        select = datapack._select_super_clusters
+        self.assertEqual(select([1, 2, 3, 4, 5], orders, [3, 2], None), [2, 3])
+        self.assertEqual(select([1, 2, 3, 4, 5], orders, None, "filtered01"), [2, 4])
+        self.assertEqual(select([1, 2, 3, 4, 5], orders, None, "initial"), [1, 2, 3, 4, 5])
+        self.assertEqual(select([1, 2, 3, 4, 5], orders, [1, 2, 3], "filtered01"), [2])
+        for superclusters, result_set in (([2, 9], None), (None, "filtered02"), ([3], "filtered01")):
+            with self.assertRaises(datapack.SelectionError):
+                select([1, 2, 3, 4, 5], orders, superclusters, result_set)
+
+    def test_color_ranks(self):
+        # TTviz Lite colours: the set's priority order, then superclusters failing it in the initial order, then IDs
+        orders = {"initial": [3, 1, 2], "filtered01": [2]}
+        ranks = datapack._color_ranks([1, 2, 3, 4], orders, [1, 4])
+        self.assertEqual(ranks, {"initial": {"1": 1, "4": 3}, "filtered01": {"1": 2, "4": 3}})
+
+    def test_selection_arguments(self):
+        args = datapack.init_parser().parse_args(["results", "-s", "1-3,7", "-r", "filtered01"])
+        self.assertEqual((args.superclusters, args.result_set), ([1, 2, 3, 7], "filtered01"))
+        args = datapack.init_parser().parse_args(["results"])
+        self.assertEqual((args.superclusters, args.result_set), (None, None))
+        with open(os.devnull, "w") as devnull, contextlib.redirect_stderr(devnull):
+            for argv in (["results", "-s", "x"], ["results", "-r", "filtered03"]):
+                with self.assertRaises(SystemExit):
+                    datapack.init_parser().parse_args(argv)
 
     def test_collect_events(self):
         super_clusters = {
