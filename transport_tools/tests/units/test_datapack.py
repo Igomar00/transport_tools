@@ -105,6 +105,14 @@ class TestDatapackHelpers(unittest.TestCase):
                                                               "x": "/orig/out/_internal/y"})
         self.assertEqual(absolute.get("x"), "/moved/results/_internal/y")
 
+    def test_snapshot_mapping_parameters_are_exported(self):
+        # readers map event frames to CAVER snapshots as utils.SnapshotFrameMap does (the writer names its keys
+        # literally, being importable with TransportTools 0.9.8)
+        from transport_tools.libs.utils import SnapshotFrameMap
+        for name in ("caver_traj_offset", "caver_snapshot_stride", "interpolate_missing_snapshots4matching",
+                     "snapshots_per_simulation", SnapshotFrameMap.MODE_KEY, SnapshotFrameMap.ID_STRIDE_KEY):
+            self.assertIn(name, datapack._PARAMETERS2EXPORT)
+
     def test_collect_events(self):
         super_clusters = {
             2: SimpleNamespace(transport_events={"entry": {"md1": [("5", ("WAT:12", (1, 9)))]},

@@ -76,7 +76,11 @@ _PARAMETERS2EXPORT = ["snapshots_per_simulation", "layer_thickness", "sp_radius"
                       "relevant_tunnel_min_radius", "relevant_tunnel_max_curvature", "snapshot_id_position",
                       "snapshot_delimiter", "caver_traj_offset", "clustering_cutoff", "clustering_method",
                       "clustering_linkage", "tunnel_properties_quantile", "max_events_per_cluster4visualization",
-                      "output_path"]
+                      "output_path",
+                      # mapping of event frames to CAVER snapshots (utils.SnapshotFrameMap; the last two are its
+                      # labelling of snapshot IDs, cached on the parameters once resolved)
+                      "caver_snapshot_stride", "interpolate_missing_snapshots4matching", "_caver_snapshot_by_frame",
+                      "_caver_snapshot_id_stride"]
 
 ProgressCallback = Callable[[float, str], None]
 
