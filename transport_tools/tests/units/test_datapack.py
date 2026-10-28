@@ -26,6 +26,7 @@ import tempfile
 import unittest
 import zipfile
 from types import SimpleNamespace
+from unittest import mock
 
 import numpy as np
 
@@ -142,6 +143,14 @@ class TestDatapackHelpers(unittest.TestCase):
         orders = {"initial": [3, 1, 2], "filtered01": [2]}
         ranks = datapack._color_ranks([1, 2, 3, 4], orders, [1, 4])
         self.assertEqual(ranks, {"initial": {"1": 1, "4": 3}, "filtered01": {"1": 2, "4": 3}})
+
+    def test_single_threaded_libraries_keep_values_set_by_the_user(self):
+        # NumExpr reads these when pandas loads it with TransportTools; it would otherwise use up to 16 threads
+        with mock.patch.dict(os.environ, {"OMP_NUM_THREADS": "4"}, clear=True):
+            datapack._single_threaded_libraries()
+            self.assertEqual(os.environ["OMP_NUM_THREADS"], "4")
+            for variable in ("OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS", "BLIS_NUM_THREADS"):
+                self.assertEqual(os.environ[variable], "1")
 
     def test_selection_arguments(self):
         args = datapack.init_parser().parse_args(["results", "-s", "1-3,7", "-r", "filtered01"])

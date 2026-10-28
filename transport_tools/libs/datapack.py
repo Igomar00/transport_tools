@@ -1239,6 +1239,20 @@ def _assemble(tmp_out_file: str, results_dir: str, paths: _ResultsPaths, latest,
         writer.close()
 
 
+def _single_threaded_libraries():
+    """
+    Keeps numerical libraries to one thread per process, as the worker pools of TransportTools do
+    (utils.cap_blas_threads_for_worker): the conversion runs in up to num_processes single-threaded processes. Without
+    it NumExpr, which pandas loads with TransportTools, sizes its idle thread pool by all CPUs of the machine (up to 16)
+    instead of those allocated to the job, and says so in the log. Values already set in the environment are kept. It
+    applies to libraries loaded afterwards: in this process those loaded with the checkpoints, and in worker processes
+    """
+
+    for variable in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS",
+                     "BLIS_NUM_THREADS"):
+        os.environ.setdefault(variable, "1")
+
+
 def _sc_ids_argument(text: str) -> List[int]:
     try:
         return parse_sc_ids(text)
@@ -1254,7 +1268,9 @@ def init_parser() -> argparse.ArgumentParser:
                              "superclusters)".format(DEFAULT_DATAPACK_FILENAME, SUBSET_DATAPACK_FILENAME))
     parser.add_argument("-e", "--events", action="store_true",
                         help="include transport event records and their layered geometry")
-    parser.add_argument("-n", "--num_cpus", type=int, default=1, help="number of parallel processes")
+    parser.add_argument("-n", "--num_cpus", type=int, default=1,
+                        help="number of parallel single-threaded processes, used for supercluster profiles and layered "
+                             "networks of more than {} MB in total".format(_PARALLEL_MIN_BYTES // 1024 ** 2))
     parser.add_argument("-s", "--superclusters", default=None, type=_sc_ids_argument,
                         help="pack only these superclusters: IDs and ranges such as '1-5,8,12' (default: all)")
     parser.add_argument("-r", "--result_set", default=None, choices=RESULT_SET_NAMES,
@@ -1271,6 +1287,7 @@ def main(argv: Optional[List[str]] = None):
     parser = init_parser()
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+    _single_threaded_libraries()
 
     def _print_progress(fraction: float, message: str):
         print("PROGRESS {:.4f} {}".format(fraction, message), flush=True)
