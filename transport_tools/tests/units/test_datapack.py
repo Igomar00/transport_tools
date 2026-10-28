@@ -19,6 +19,7 @@
 import contextlib
 import io
 import os
+import pickle
 import shutil
 import struct
 import tempfile
@@ -180,6 +181,62 @@ class TestDatapackHelpers(unittest.TestCase):
         assignments = datapack._event_assignments(records, {"U01": 0, "WAT": 1})
         self.assertEqual(assignments.tolist(), [[1, 0, 0, 0, 0], [1, 0, 0, 1, 1], [2, 0, 0, 0, 0]])
         self.assertEqual(len(datapack.EVENT_IDENTITY), len(datapack._event_identity(records[0])))
+
+    def test_num_events_by_residue_of_checkpoints_before_tt097(self):
+        # TransportTools before 0.9.7 kept no per-residue event counts: recounted, they equal those it keeps now
+        from transport_tools.libs.networks import SuperCluster
+        from transport_tools.libs.tools import OutlierTransportEvents
+        parameters = {"perform_comparative_analysis": True, "comparative_groups_definition": {"g1": ["md1", "md2"]},
+                      "transformation_folder": "transform", "caver_foldername": "caver",
+                      "super_cluster_path_set_folder": "pathsets"}
+        events = [("md1", "5", "entry", ("WAT:12", (1, 9))), ("md1", "6", "entry", ("U01:1", (2, 3))),
+                  ("md2", "7", "release", ("WAT:3", (3, 4))), ("md3", "2", "entry", ("WAT:7", (4, 5))),
+                  ("md3", "3", "release", ("U01:1", (6, 8)))]
+        super_cluster = SuperCluster(sc_id=1, parameters=parameters, total_num_md_sims=3)
+        super_cluster.set_properties({"g1": True})  # events of md3 cannot be assigned locally
+        outliers = OutlierTransportEvents(parameters)
+        for i, (md_label, path_id, event_type, traced_event) in enumerate(events):
+            super_cluster.add_transport_event(md_label, path_id, event_type, traced_event)
+            outliers.add_transport_event(md_label, path_id, event_type, traced_event, globally_unassigned=i % 2 == 0)
+        self.assertNotIn("md3", super_cluster.num_events)
+        membership = {"md1": "g1", "md2": "g1"}
+        for holder, is_outliers in ((super_cluster, False), (outliers, True)):
+            kept = holder.num_events_by_residue
+            del holder.num_events_by_residue
+            self.assertEqual(datapack._num_events_by_residue(holder, membership, outliers=is_outliers), kept)
+            holder.num_events_by_residue = kept
+            self.assertIs(datapack._num_events_by_residue(holder, membership, outliers=is_outliers), kept)
+
+    def test_parameters_renamed_in_tt098_are_exported_from_older_checkpoints(self):
+        from transport_tools.libs.config import AnalysisConfig
+        config = AnalysisConfig(file2load_from=None, logging=False)
+        self.assertEqual({old: new for new, old in datapack._LEGACY_PARAMETER_NAMES.items()}, config.legacy_params)
+        for new in datapack._LEGACY_PARAMETER_NAMES:
+            self.assertIn(new, datapack._PARAMETERS2EXPORT)
+        self.assertEqual(datapack._exported_parameter({"min_tunnel_radius4clustering": 0.75},
+                                                      "relevant_tunnel_min_radius"), 0.75)
+        self.assertEqual(datapack._exported_parameter({"min_tunnel_radius4clustering": None,
+                                                       "relevant_tunnel_min_radius": 0.9},
+                                                      "relevant_tunnel_min_radius"), 0.9)
+        self.assertIsNone(datapack._exported_parameter({}, "caver_snapshot_stride"))
+
+    def test_event_geometry_of_checkpoints_before_tt097(self):
+        # layered AQUA-DUCT data of TransportTools before 0.9.7 name events without the traced residue
+        path_set = SimpleNamespace(nodes_data=np.array([[0, 0, 0, -1, 0, 0.5], [1, 2, 3, 0, 1, 1.0]]),
+                                   node_labels=["SP", "0_1"], node_paths=[np.array(["SP", "0_1"])])
+        tmp_dir = tempfile.mkdtemp()
+        try:
+            aquaduct_file = os.path.join(tmp_dir, "md1_layered_paths.dump")
+            with open(aquaduct_file, "wb") as out_stream:
+                pickle.dump({"7_entry": path_set}, out_stream)
+            result = datapack._process_md_worker((0, os.path.join(tmp_dir, "none.dump"), [], aquaduct_file,
+                                                  [(0, "wat_7_entry"), (1, "wat_8_release")],
+                                                  os.path.join(tmp_dir, "md0")))
+            self.assertEqual((result["num_pathsets"], result["missing_events"]), (1, ["wat_8_release"]))
+            self.assertEqual(np.load(os.path.join(tmp_dir, "md0_keys.npy")).tolist(),
+                             [[datapack.PATHSET_KIND_EVENT, 0, 0]])
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
     def test_stale_checkpoints_of_an_earlier_stage5_run_are_skipped(self):
         def run(clusters):

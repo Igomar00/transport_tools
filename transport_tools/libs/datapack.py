@@ -83,6 +83,10 @@ _PARAMETERS2EXPORT = ["snapshots_per_simulation", "layer_thickness", "sp_radius"
                       # labelling of snapshot IDs, cached on the parameters once resolved)
                       "caver_snapshot_stride", "interpolate_missing_snapshots4matching", "_caver_snapshot_by_frame",
                       "_caver_snapshot_id_stride"]
+# names of exported parameters in checkpoints of TransportTools before 0.9.8 (its config.legacy_params)
+_LEGACY_PARAMETER_NAMES = {"relevant_tunnel_min_radius": "min_tunnel_radius4clustering",
+                           "relevant_tunnel_min_length": "min_tunnel_length4clustering",
+                           "relevant_tunnel_max_curvature": "max_tunnel_curvature4clustering"}
 
 ProgressCallback = Callable[[float, str], None]
 
@@ -468,8 +472,11 @@ def _process_md_worker(task: Tuple[int, str, List[int], str, List[Tuple[int, str
         else:
             layered_entities = dict()
         for event_index, entity_key in event_keys:
-            if entity_key in layered_entities:
-                chunk.add(PATHSET_KIND_EVENT, event_index, 0, layered_entities[entity_key])
+            # TransportTools before 0.9.7 named events without the traced residue: '12_entry' for 'wat_12_entry'
+            for key in (entity_key, "_".join(entity_key.split("_")[-2:])):
+                if key in layered_entities:
+                    chunk.add(PATHSET_KIND_EVENT, event_index, 0, layered_entities[key])
+                    break
             else:
                 missing_events.append(entity_key)
         del layered_entities
@@ -601,6 +608,20 @@ class _IndexedWorker:
 
 def _filters_from_checkpoint(transport_processes) -> Dict[str, Any]:
     return _jsonable(transport_processes._active_filters)
+
+
+def _exported_parameter(parameters: dict, name: str) -> Any:
+    """
+    Value of a parameter to export, read under its name before TransportTools 0.9.8 if the checkpoint is older
+    :param parameters: job configuration parameters stored in a checkpoint
+    :param name: name of the parameter
+    :return: its value, None if the checkpoint has none
+    """
+
+    value = parameters.get(name)
+    if value is None and name in _LEGACY_PARAMETER_NAMES:
+        value = parameters.get(_LEGACY_PARAMETER_NAMES[name])
+    return value
 
 
 def _prioritized_order(transport_processes) -> List[int]:
@@ -760,6 +781,48 @@ def _event_assignments(event_records: list, resname_indices: Dict[str, int]) -> 
     rows = sorted((record[0], record[1], record[2], resname_indices[record[3]], event_ids[_event_identity(record)])
                   for record in event_records if record[0] >= 0)
     return np.asarray(rows, dtype=np.int32).reshape(-1, 5)
+
+
+def _num_events_by_residue(holder, membership: Dict[str, str], outliers: bool = False) \
+        -> Dict[str, Dict[str, Dict[str, int]]]:
+    """
+    Counts of transport events per traced residue name, kept by TransportTools 0.9.7 and later in
+    num_events_by_residue. Checkpoints of earlier versions lack them, so they are recounted from the stored events as
+    add_transport_event counts them: a supercluster counts every event overall and for the statistics label of its
+    simulation (its comparative group, else the simulation) only if the event could be assigned locally there, which
+    holds for all or none of the events of a label, i.e. for the labels in num_events; outlier events count for their
+    labels always and overall only if unassigned globally
+    :param holder: SuperCluster or OutlierTransportEvents from a checkpoint
+    :param membership: md_label -> comparative group, for simulations in groups
+    :param outliers: if the holder is OutlierTransportEvents
+    :return: statistics label -> resname -> event type -> number of events
+    """
+
+    stored = getattr(holder, "num_events_by_residue", None)
+    if stored is not None:
+        return stored
+
+    counts: Dict[str, Dict[str, Dict[str, int]]] = {"overall": dict()}
+
+    def _count(label: str, event_type: str, traced_event: Tuple[str, Tuple[int, int]]):
+        counts4resname = counts.setdefault(label, dict()).setdefault(traced_event[0].split(":")[0],
+                                                                     {name: 0 for name in EVENT_TYPES})
+        counts4resname[event_type] += 1
+
+    for event_type, events4md in holder.transport_events.items():
+        for md_label, events in events4md.items():
+            label = membership.get(md_label, md_label)
+            for _, traced_event in events:
+                if not outliers:
+                    _count("overall", event_type, traced_event)
+                if outliers or label in holder.num_events:
+                    _count(label, event_type, traced_event)
+    if outliers:
+        for event_type, events4md in holder.transport_events_global.items():
+            for events in events4md.values():
+                for _, traced_event in events:
+                    _count("overall", event_type, traced_event)
+    return counts
 
 
 def write_datapack(results_dir: str, out_file: Optional[str] = None, include_events: bool = False,
@@ -1087,6 +1150,7 @@ def _assemble(tmp_out_file: str, results_dir: str, paths: _ResultsPaths, latest,
         sc_entries = list()
         event_counts = list()
         resname_indices = {resname: i for i, resname in enumerate(event_resnames)}
+        membership = {md_label: group for group, members in (groups or dict()).items() for md_label in members}
         for sc_id, result in zip(sc_ids, sc_results):
             super_cluster = latest._super_clusters[sc_id]
             entry = {
@@ -1098,7 +1162,7 @@ def _assemble(tmp_out_file: str, results_dir: str, paths: _ResultsPaths, latest,
             }
             if events_assigned:
                 entry["num_events"] = _jsonable(super_cluster.num_events)
-                entry["num_events_by_residue"] = _jsonable(super_cluster.num_events_by_residue)
+                entry["num_events_by_residue"] = _jsonable(_num_events_by_residue(super_cluster, membership))
             sc_entries.append(entry)
 
         if events_assigned:
@@ -1120,7 +1184,8 @@ def _assemble(tmp_out_file: str, results_dir: str, paths: _ResultsPaths, latest,
         outliers = None
         if events_assigned and latest._outlier_transport_events is not None:
             outliers = {"num_events": _jsonable(latest._outlier_transport_events.num_events),
-                        "num_events_by_residue": _jsonable(latest._outlier_transport_events.num_events_by_residue)}
+                        "num_events_by_residue": _jsonable(_num_events_by_residue(latest._outlier_transport_events,
+                                                                                  membership, outliers=True))}
 
         # reference structure
         protein_file = os.path.join(paths.get("transformation_folder"), "ref_transformed.pdb")
@@ -1129,7 +1194,7 @@ def _assemble(tmp_out_file: str, results_dir: str, paths: _ResultsPaths, latest,
             with open(protein_file, "rb") as in_stream:
                 writer.write_bytes("protein.pdb", in_stream.read())
 
-        exported_parameters = {name: _jsonable(parameters.get(name)) for name in _PARAMETERS2EXPORT}
+        exported_parameters = {name: _jsonable(_exported_parameter(parameters, name)) for name in _PARAMETERS2EXPORT}
         manifest = {
             "format": DATAPACK_FORMAT,
             "version": DATAPACK_VERSION,
